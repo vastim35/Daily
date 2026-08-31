@@ -1,19 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
   <rect width="100" height="100" rx="24" fill="#1C2027"/>
-  <circle cx="50" cy="50" r="40" fill="none" stroke="rgba(236,231,220,0.16)" stroke-width="1.5"/>
-  <line x1="50.00" y1="10.00" x2="50.00" y2="16.00" stroke="rgba(236,231,220,0.55)" stroke-width="2" stroke-linecap="round"/>
-<line x1="70.00" y1="15.36" x2="67.00" y2="20.56" stroke="rgba(236,231,220,0.55)" stroke-width="2" stroke-linecap="round"/>
-<line x1="84.64" y1="30.00" x2="79.44" y2="33.00" stroke="rgba(236,231,220,0.55)" stroke-width="2" stroke-linecap="round"/>
-<line x1="90.00" y1="50.00" x2="84.00" y2="50.00" stroke="rgba(236,231,220,0.55)" stroke-width="2" stroke-linecap="round"/>
-<line x1="84.64" y1="70.00" x2="79.44" y2="67.00" stroke="rgba(236,231,220,0.55)" stroke-width="2" stroke-linecap="round"/>
-<line x1="70.00" y1="84.64" x2="67.00" y2="79.44" stroke="rgba(236,231,220,0.55)" stroke-width="2" stroke-linecap="round"/>
-<line x1="50.00" y1="90.00" x2="50.00" y2="84.00" stroke="rgba(236,231,220,0.55)" stroke-width="2" stroke-linecap="round"/>
-<line x1="30.00" y1="84.64" x2="33.00" y2="79.44" stroke="rgba(236,231,220,0.55)" stroke-width="2" stroke-linecap="round"/>
-<line x1="15.36" y1="70.00" x2="20.56" y2="67.00" stroke="rgba(236,231,220,0.55)" stroke-width="2" stroke-linecap="round"/>
-<line x1="10.00" y1="50.00" x2="16.00" y2="50.00" stroke="rgba(236,231,220,0.55)" stroke-width="2" stroke-linecap="round"/>
-<line x1="15.36" y1="30.00" x2="24.02" y2="35.00" stroke="#E8A54B" stroke-width="3.2" stroke-linecap="round"/>
-<line x1="30.00" y1="15.36" x2="33.00" y2="20.56" stroke="rgba(236,231,220,0.55)" stroke-width="2" stroke-linecap="round"/>
-
-  <line x1="50" y1="50" x2="29.22" y2="38.00" stroke="#E8A54B" stroke-width="3.4" stroke-linecap="round"/>
-  <circle cx="50" cy="50" r="4.2" fill="#E8A54B"/>
+  <path fill-rule="evenodd" fill="#ECE7DC" d="M38,22 H48 A28,28 0 0 1 48,78 H38 Z M38,34 H48 A16,16 0 0 1 48,66 H38 Z"/>
+  <rect x="24" y="22" width="12" height="56" rx="3" fill="#E8A54B"/>
 </svg>
