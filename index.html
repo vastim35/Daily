@@ -618,11 +618,17 @@ function showToast(msg, ms=2600){
 
 /* ================= Storage ================= */
 async function loadData(){
-  try{ const t = await window.storage.get('weekly-template'); if(t) template = JSON.parse(t.value); }catch(e){}
-  try{ const o = await window.storage.get('daily-overrides'); if(o) overrides = JSON.parse(o.value); }catch(e){}
+  try{ const t = localStorage.getItem('weekly-template'); if(t) template = JSON.parse(t); }catch(e){ console.error('Не удалось загрузить шаблон недели', e); }
+  try{ const o = localStorage.getItem('daily-overrides'); if(o) overrides = JSON.parse(o); }catch(e){ console.error('Не удалось загрузить правки дня', e); }
 }
-async function saveTemplate(){ try{ await window.storage.set('weekly-template', JSON.stringify(template)); }catch(e){ console.error(e); } }
-async function saveOverrides(){ try{ await window.storage.set('daily-overrides', JSON.stringify(overrides)); }catch(e){ console.error(e); } }
+async function saveTemplate(){
+  try{ localStorage.setItem('weekly-template', JSON.stringify(template)); }
+  catch(e){ console.error(e); showToast('Не удалось сохранить шаблон на устройстве'); }
+}
+async function saveOverrides(){
+  try{ localStorage.setItem('daily-overrides', JSON.stringify(overrides)); }
+  catch(e){ console.error(e); showToast('Не удалось сохранить изменения дня на устройстве'); }
+}
 
 /* ================= Derived data ================= */
 function getDayEvents(date){
@@ -835,66 +841,67 @@ document.getElementById('saveBtn').onclick=async ()=>{
   const duration = parseInt(document.getElementById('fDuration').value);
   const remind = [...currentReminders];
   const once = document.getElementById('scopeOnce').classList.contains('on');
-  const saveBtn = document.getElementById('saveBtn');
-  saveBtn.disabled = true; saveBtn.textContent='Сохраняю…';
 
-  try{
-    if(editing.mode==='template'){
-      const iso = editing.iso;
-      if(editing.event){
+  // 1) Save locally and update the UI immediately — this never waits on Google.
+  if(editing.mode==='template'){
+    const iso = editing.iso;
+    let savedItem;
+    if(editing.event){
+      const idx = template[iso].findIndex(e=>e.id===editing.event.id);
+      template[iso][idx] = {...template[iso][idx], time, duration, remind, title};
+      savedItem = template[iso][idx];
+    } else {
+      const item = {id:uid(), time, duration, remind, title};
+      template[iso].push(item);
+      savedItem = template[iso][template[iso].length-1];
+    }
+    await saveTemplate();
+    renderTemplateView();
+    closeModal();
+    syncTemplateEvent(iso, savedItem).catch(e=>console.error(e));
+  } else {
+    const key = formatDate(selectedDate);
+    if(!overrides[key]) overrides[key]={added:[],removedIds:[]};
+    let syncPromise = Promise.resolve();
+
+    if(once){
+      if(editing.event && editing.isCustom){
+        const idx = overrides[key].added.findIndex(e=>e.id===editing.event.id);
+        overrides[key].added[idx] = {...overrides[key].added[idx], time, duration, remind, title};
+        await saveOverrides();
+        syncPromise = syncCustomEvent(overrides[key].added[idx], selectedDate);
+      } else if(editing.event && !editing.isCustom){
+        overrides[key].removedIds = [...new Set([...overrides[key].removedIds, editing.event.id])];
+        const newItem = {id:uid(), time, duration, remind, title};
+        overrides[key].added.push(newItem);
+        await saveOverrides();
+        syncPromise = syncInstanceEdit(editing.event, selectedDate, newItem);
+      } else {
+        const newItem = {id:uid(), time, duration, remind, title};
+        overrides[key].added.push(newItem);
+        await saveOverrides();
+        syncPromise = syncCustomEvent(newItem, selectedDate);
+      }
+    } else {
+      const iso = isoWeekday(selectedDate);
+      let savedItem;
+      if(editing.event && !editing.isCustom){
         const idx = template[iso].findIndex(e=>e.id===editing.event.id);
         template[iso][idx] = {...template[iso][idx], time, duration, remind, title};
-        await saveTemplate();
-        await syncTemplateEvent(iso, template[iso][idx]);
+        savedItem = template[iso][idx];
       } else {
         const item = {id:uid(), time, duration, remind, title};
         template[iso].push(item);
-        await saveTemplate();
-        await syncTemplateEvent(iso, template[iso][template[iso].length-1]);
+        savedItem = template[iso][template[iso].length-1];
       }
-      renderTemplateView();
-    } else {
-      const key = formatDate(selectedDate);
-      if(!overrides[key]) overrides[key]={added:[],removedIds:[]};
-
-      if(once){
-        if(editing.event && editing.isCustom){
-          const idx = overrides[key].added.findIndex(e=>e.id===editing.event.id);
-          overrides[key].added[idx] = {...overrides[key].added[idx], time, duration, remind, title};
-          await saveOverrides();
-          await syncCustomEvent(overrides[key].added[idx], selectedDate);
-        } else if(editing.event && !editing.isCustom){
-          overrides[key].removedIds = [...new Set([...overrides[key].removedIds, editing.event.id])];
-          const newItem = {id:uid(), time, duration, remind, title};
-          overrides[key].added.push(newItem);
-          await saveOverrides();
-          await syncInstanceEdit(editing.event, selectedDate, newItem);
-        } else {
-          const newItem = {id:uid(), time, duration, remind, title};
-          overrides[key].added.push(newItem);
-          await saveOverrides();
-          await syncCustomEvent(newItem, selectedDate);
-        }
-      } else {
-        const iso = isoWeekday(selectedDate);
-        if(editing.event && !editing.isCustom){
-          const idx = template[iso].findIndex(e=>e.id===editing.event.id);
-          template[iso][idx] = {...template[iso][idx], time, duration, remind, title};
-          await saveTemplate();
-          await syncTemplateEvent(iso, template[iso][idx]);
-        } else {
-          const item = {id:uid(), time, duration, remind, title};
-          template[iso].push(item);
-          await saveTemplate();
-          await syncTemplateEvent(iso, template[iso][template[iso].length-1]);
-        }
-      }
-      render();
+      await saveTemplate();
+      syncPromise = syncTemplateEvent(iso, savedItem);
     }
-  } finally {
-    saveBtn.disabled = false; saveBtn.textContent='Сохранить';
+    render();
+    closeModal();
+    // 2) Google sync happens in the background — failures never block or reopen the UI.
+    syncPromise.catch(e=>console.error(e));
   }
-  closeModal();
 };
 
 document.getElementById('deleteEventBtn').onclick=async ()=>{
@@ -903,7 +910,7 @@ document.getElementById('deleteEventBtn').onclick=async ()=>{
     const item = editing.event;
     template[iso] = template[iso].filter(e=>e.id!==item.id);
     await saveTemplate();
-    if(item.gcalId) gcalDelete(item.gcalId);
+    if(item.gcalId) gcalDelete(item.gcalId).catch(e=>console.error(e));
     renderTemplateView();
   } else {
     await deleteDayEvent({...editing.event, custom:editing.isCustom});
@@ -917,16 +924,19 @@ async function deleteDayEvent(ev){
   if(ev.custom){
     overrides[key].added = overrides[key].added.filter(e=>e.id!==ev.id);
     await saveOverrides();
-    if(ev.gcalId) gcalDelete(ev.gcalId);
+    render();
+    if(ev.gcalId) gcalDelete(ev.gcalId).catch(e=>console.error(e));
   } else {
     overrides[key].removedIds = [...new Set([...overrides[key].removedIds, ev.id])];
     await saveOverrides();
+    render();
     if(ev.gcalId && accessToken){
-      const instId = await gcalResolveInstance(ev.gcalId, selectedDate);
-      if(instId) gcalDelete(instId);
+      (async ()=>{
+        const instId = await gcalResolveInstance(ev.gcalId, selectedDate);
+        if(instId) gcalDelete(instId).catch(e=>console.error(e));
+      })().catch(e=>console.error(e));
     }
   }
-  render();
 }
 
 document.getElementById('fabAdd').onclick=()=>{
@@ -990,10 +1000,11 @@ let tplReminders = [];
 let tplEditingId = null;
 
 async function loadEventTemplates(){
-  try{ const t = await window.storage.get('event-templates'); if(t) eventTemplates = JSON.parse(t.value); }catch(e){}
+  try{ const t = localStorage.getItem('event-templates'); if(t) eventTemplates = JSON.parse(t); }catch(e){ console.error('Не удалось загрузить шаблоны мероприятий', e); }
 }
 async function saveEventTemplates(){
-  try{ await window.storage.set('event-templates', JSON.stringify(eventTemplates)); }catch(e){ console.error(e); }
+  try{ localStorage.setItem('event-templates', JSON.stringify(eventTemplates)); }
+  catch(e){ console.error(e); showToast('Не удалось сохранить шаблон мероприятия'); }
 }
 
 function renderQuickTplRow(){
@@ -1123,18 +1134,32 @@ document.getElementById('tplDeleteBtn').onclick=async ()=>{
 };
 
 /* ================= Google Sign-In & Calendar API ================= */
+let tokenExpiry = 0;
+let silentRefreshInFlight = false;
+
 function initGoogle(){
   if(!window.google || !google.accounts){ setTimeout(initGoogle, 300); return; }
   tokenClient = google.accounts.oauth2.initTokenClient({
     client_id: CLIENT_ID,
     scope: SCOPES,
     callback: (resp)=>{
+      silentRefreshInFlight = false;
       if(resp.error){ showToast('Не удалось подключиться к Google Календарю'); return; }
       accessToken = resp.access_token;
+      tokenExpiry = Date.now() + ((resp.expires_in||3300)*1000);
       updateCalBtn();
       showToast('Google Календарь подключён');
     }
   });
+  // Proactively renew the token before it expires, quietly, without blocking anything.
+  setInterval(()=>{
+    if(!accessToken || silentRefreshInFlight) return;
+    if(Date.now() > tokenExpiry - 5*60000){
+      silentRefreshInFlight = true;
+      try{ tokenClient.requestAccessToken({prompt:''}); }
+      catch(e){ silentRefreshInFlight = false; }
+    }
+  }, 60000);
 }
 function updateCalBtn(){
   const btn = document.getElementById('calBtn');
@@ -1144,30 +1169,38 @@ document.getElementById('calBtn').onclick=()=>{
   if(!tokenClient){ showToast('Google ещё загружается, попробуй через секунду'); return; }
   if(accessToken){
     if(confirm('Отключить синхронизацию с Google Календарём?')){
-      google.accounts.oauth2.revoke(accessToken, ()=>{ accessToken=null; updateCalBtn(); showToast('Отключено'); });
+      google.accounts.oauth2.revoke(accessToken, ()=>{
+        accessToken=null; tokenExpiry=0; notNotifiedDisconnected=true;
+        updateCalBtn(); showToast('Отключено');
+      });
     }
     return;
   }
-  tokenClient.requestAccessToken({prompt:''});
+  // Explicit user click: let Google show whatever UI it needs (account picker / consent).
+  // Never force prompt:'' here — that mode shows nothing if there's no live session, and
+  // reconnect attempts would silently do nothing.
+  tokenClient.requestAccessToken();
 };
 
-async function gcalFetch(path, options={}, isRetry=false){
+async function gcalFetch(path, options={}){
   if(!accessToken) return null;
   try{
-    const res = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/'+path, {
-      ...options,
-      headers:{...(options.headers||{}), 'Authorization':'Bearer '+accessToken, 'Content-Type':'application/json'}
-    });
-    if(res.status===401 && !isRetry){
-      await new Promise(resolve=>{
-        tokenClient.callback = (resp)=>{ accessToken=resp.access_token||null; resolve(); };
-        tokenClient.requestAccessToken({prompt:''});
-      });
-      return gcalFetch(path, options, true);
+    const res = await Promise.race([
+      fetch('https://www.googleapis.com/calendar/v3/calendars/primary/'+path, {
+        ...options,
+        headers:{...(options.headers||{}), 'Authorization':'Bearer '+accessToken, 'Content-Type':'application/json'}
+      }),
+      new Promise((_,reject)=>setTimeout(()=>reject(new Error('timeout')), 12000))
+    ]);
+    if(res.status===401){
+      accessToken = null;
+      updateCalBtn();
+      showToast('Сессия Google Календаря истекла — нажми 📅, чтобы войти снова');
+      return null;
     }
     if(res.status===204) return {ok:true};
     if(!res.ok){ return null; }
-    return res.status===204 ? {ok:true} : await res.json();
+    return await res.json();
   }catch(e){ return null; }
 }
 function buildReminders(remindArr){
@@ -1185,8 +1218,12 @@ async function gcalResolveInstance(masterId, dateObj){
   if(data && data.items && data.items.length) return data.items[0].id;
   return null;
 }
+let notNotifiedDisconnected = true;
 async function syncTemplateEvent(iso, item){
-  if(!accessToken) return;
+  if(!accessToken){
+    if(notNotifiedDisconnected){ notNotifiedDisconnected=false; showToast('Google Календарь не подключён — событие сохранено только локально. Нажми 📅, чтобы синхронизировать.'); }
+    return;
+  }
   const start = nextOccurrence(iso);
   const [h,m] = item.time.split(':').map(Number);
   start.setHours(h,m,0,0);
@@ -1209,7 +1246,10 @@ async function syncTemplateEvent(iso, item){
   }
 }
 async function syncCustomEvent(item, dateObj){
-  if(!accessToken) return;
+  if(!accessToken){
+    if(notNotifiedDisconnected){ notNotifiedDisconnected=false; showToast('Google Календарь не подключён — событие сохранено только локально. Нажми 📅, чтобы синхронизировать.'); }
+    return;
+  }
   const start = new Date(dateObj);
   const [h,m] = item.time.split(':').map(Number);
   start.setHours(h,m,0,0);
