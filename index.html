@@ -2,6 +2,9 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
 <meta name="theme-color" content="#14171C">
 <title>DaiLy</title>
@@ -413,7 +416,7 @@
       </div>
       <div class="top-actions">
         <button class="icon-btn" id="tplLibBtn" title="Шаблоны мероприятий">🏷️</button>
-        <button class="icon-btn" id="calBtn" title="Google Календарь">📅</button>
+        <button class="icon-btn" id="calBtn" title="Google Календарь">📅<span class="dot hidden" id="calPendingDot"></span></button>
         <button class="icon-btn" id="notifBtn" title="Уведомления в браузере">🔔</button>
       </div>
     </div>
@@ -616,18 +619,81 @@ function showToast(msg, ms=2600){
   showToast._h=setTimeout(()=>t.classList.remove('show'), ms);
 }
 
+/* ================= Durable local database (IndexedDB + localStorage fallback) =================
+   Every write goes to both IndexedDB and localStorage. Reads try IndexedDB first, then fall
+   back to localStorage. This means a single blocked/cleared storage layer can't lose data. */
+const IDB_NAME = 'daily-planner-db';
+const IDB_STORE = 'kv';
+let _idbPromise = null;
+function idb(){
+  if(_idbPromise) return _idbPromise;
+  _idbPromise = new Promise((resolve, reject)=>{
+    if(!window.indexedDB){ reject(new Error('no-indexeddb')); return; }
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = ()=>{ req.result.createObjectStore(IDB_STORE); };
+    req.onsuccess = ()=>resolve(req.result);
+    req.onerror = ()=>reject(req.error);
+  });
+  return _idbPromise;
+}
+async function dbSet(key, value){
+  let ok = false;
+  try{ localStorage.setItem('dp:'+key, JSON.stringify(value)); ok = true; }catch(e){}
+  try{
+    const db = await idb();
+    await new Promise((resolve, reject)=>{
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).put(value, key);
+      tx.oncomplete = ()=>resolve();
+      tx.onerror = ()=>reject(tx.error);
+    });
+    ok = true;
+  }catch(e){}
+  return ok;
+}
+async function dbGet(key){
+  try{
+    const db = await idb();
+    const val = await new Promise((resolve, reject)=>{
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const r = tx.objectStore(IDB_STORE).get(key);
+      r.onsuccess = ()=>resolve(r.result);
+      r.onerror = ()=>reject(r.error);
+    });
+    if(val !== undefined) return val;
+  }catch(e){}
+  try{
+    const raw = localStorage.getItem('dp:'+key);
+    if(raw) return JSON.parse(raw);
+  }catch(e){}
+  return undefined;
+}
+// One-time move of data saved by earlier versions of the app (plain localStorage keys)
+// into the new dual-write database, so nobody's existing schedule looks like it vanished.
+async function migrateLegacyStorage(){
+  const legacyKeys = ['weekly-template','daily-overrides','event-templates','gcal-token-v1'];
+  for(const k of legacyKeys){
+    try{
+      const already = await dbGet(k);
+      if(already !== undefined) continue;
+      const raw = localStorage.getItem(k);
+      if(raw) await dbSet(k, JSON.parse(raw));
+    }catch(e){}
+  }
+}
+
 /* ================= Storage ================= */
 async function loadData(){
-  try{ const t = localStorage.getItem('weekly-template'); if(t) template = JSON.parse(t); }catch(e){ console.error('Не удалось загрузить шаблон недели', e); }
-  try{ const o = localStorage.getItem('daily-overrides'); if(o) overrides = JSON.parse(o); }catch(e){ console.error('Не удалось загрузить правки дня', e); }
+  try{ const t = await dbGet('weekly-template'); if(t) template = t; }catch(e){ console.error('Не удалось загрузить шаблон недели', e); }
+  try{ const o = await dbGet('daily-overrides'); if(o) overrides = o; }catch(e){ console.error('Не удалось загрузить правки дня', e); }
 }
 async function saveTemplate(){
-  try{ localStorage.setItem('weekly-template', JSON.stringify(template)); }
-  catch(e){ console.error(e); showToast('Не удалось сохранить шаблон на устройстве'); }
+  const ok = await dbSet('weekly-template', template);
+  if(!ok) showToast('Не удалось сохранить на устройстве — освободи немного памяти в телефоне');
 }
 async function saveOverrides(){
-  try{ localStorage.setItem('daily-overrides', JSON.stringify(overrides)); }
-  catch(e){ console.error(e); showToast('Не удалось сохранить изменения дня на устройстве'); }
+  const ok = await dbSet('daily-overrides', overrides);
+  if(!ok) showToast('Не удалось сохранить на устройстве — освободи немного памяти в телефоне');
 }
 
 /* ================= Derived data ================= */
@@ -646,6 +712,7 @@ function render(){
   renderGreeting();
   renderWeekStrip();
   renderTimeline();
+  updatePendingBadge();
 }
 function renderGreeting(){
   const h = new Date().getHours();
@@ -1010,11 +1077,11 @@ let tplReminders = [];
 let tplEditingId = null;
 
 async function loadEventTemplates(){
-  try{ const t = localStorage.getItem('event-templates'); if(t) eventTemplates = JSON.parse(t); }catch(e){ console.error('Не удалось загрузить шаблоны мероприятий', e); }
+  try{ const t = await dbGet('event-templates'); if(t) eventTemplates = t; }catch(e){ console.error('Не удалось загрузить шаблоны мероприятий', e); }
 }
 async function saveEventTemplates(){
-  try{ localStorage.setItem('event-templates', JSON.stringify(eventTemplates)); }
-  catch(e){ console.error(e); showToast('Не удалось сохранить шаблон мероприятия'); }
+  const ok = await dbSet('event-templates', eventTemplates);
+  if(!ok) showToast('Не удалось сохранить шаблон мероприятия');
 }
 
 function renderQuickTplRow(){
@@ -1151,19 +1218,12 @@ const TOKEN_STORAGE_KEY = 'gcal-token-v1';
 const SILENT_REFRESH_COOLDOWN = 10*60000; // don't hammer Google after a failed silent attempt
 
 function persistToken(){
-  try{
-    if(accessToken){
-      localStorage.setItem(TOKEN_STORAGE_KEY, JSON.stringify({accessToken, tokenExpiry}));
-    } else {
-      localStorage.removeItem(TOKEN_STORAGE_KEY);
-    }
-  }catch(e){ /* ignore */ }
+  if(accessToken){ dbSet(TOKEN_STORAGE_KEY, {accessToken, tokenExpiry}); }
+  else { dbSet(TOKEN_STORAGE_KEY, null); }
 }
-function restoreTokenFromStorage(){
+async function restoreTokenFromStorage(){
   try{
-    const raw = localStorage.getItem(TOKEN_STORAGE_KEY);
-    if(!raw) return;
-    const data = JSON.parse(raw);
+    const data = await dbGet(TOKEN_STORAGE_KEY);
     if(data && data.accessToken && data.tokenExpiry > Date.now() + 60000){
       accessToken = data.accessToken;
       tokenExpiry = data.tokenExpiry;
@@ -1309,13 +1369,15 @@ async function syncTemplateEvent(iso, item, opts={}){
   let result;
   if(item.gcalId){
     result = await gcalFetch('events/'+encodeURIComponent(item.gcalId), {method:'PATCH', body:JSON.stringify(body)});
-    if(!result && !opts.silent) showToast('Не удалось обновить событие в календаре');
+    if(!result && !opts.silent) showToast('Не удалось обновить событие в календаре — повторю попытку позже');
   } else {
     body.recurrence = ['RRULE:FREQ=WEEKLY;BYDAY='+BYDAY[iso-1]];
     result = await gcalFetch('events', {method:'POST', body:JSON.stringify(body)});
-    if(result && result.id){ item.gcalId = result.id; await saveTemplate(); }
-    else if(!opts.silent) showToast('Не удалось добавить событие в календарь');
+    if(result && result.id){ item.gcalId = result.id; }
+    else if(!opts.silent) showToast('Не удалось добавить событие в календарь — оно сохранено и попробует синхронизироваться снова');
   }
+  item.dirty = !result;
+  await saveTemplate();
   return !!result;
 }
 async function syncCustomEvent(item, dateObj, opts={}){
@@ -1336,16 +1398,18 @@ async function syncCustomEvent(item, dateObj, opts={}){
   let result;
   if(item.gcalId){
     result = await gcalFetch('events/'+encodeURIComponent(item.gcalId), {method:'PATCH', body:JSON.stringify(body)});
-    if(!result && !opts.silent) showToast('Не удалось обновить событие в календаре');
+    if(!result && !opts.silent) showToast('Не удалось обновить событие в календаре — повторю попытку позже');
   } else {
     result = await gcalFetch('events', {method:'POST', body:JSON.stringify(body)});
-    if(result && result.id){ item.gcalId = result.id; await saveOverrides(); }
-    else if(!opts.silent) showToast('Не удалось добавить событие в календарь');
+    if(result && result.id){ item.gcalId = result.id; }
+    else if(!opts.silent) showToast('Не удалось добавить событие в календарь — оно сохранено и попробует синхронизироваться снова');
   }
+  item.dirty = !result;
+  await saveOverrides();
   return !!result;
 }
 async function syncInstanceEdit(templateEvent, dateObj, newItem){
-  if(!accessToken || !templateEvent.gcalId){ return false; }
+  if(!accessToken || !templateEvent.gcalId){ newItem.dirty = true; await saveOverrides(); return false; }
   const instId = await gcalResolveInstance(templateEvent.gcalId, dateObj);
   if(!instId){ return await syncCustomEvent(newItem, dateObj); }
   const start = new Date(dateObj);
@@ -1359,27 +1423,47 @@ async function syncInstanceEdit(templateEvent, dateObj, newItem){
     reminders: buildReminders(newItem.remind)
   };
   const result = await gcalFetch('events/'+encodeURIComponent(instId), {method:'PATCH', body:JSON.stringify(body)});
-  if(result){ newItem.gcalId = instId; await saveOverrides(); }
-  else showToast('Не удалось синхронизировать изменение этого дня');
+  if(result){ newItem.gcalId = instId; }
+  else showToast('Не удалось синхронизировать изменение этого дня — повторю попытку позже');
+  newItem.dirty = !result;
+  await saveOverrides();
   return !!result;
 }
 
-// Push anything that was created/edited while disconnected (or while a sync silently
-// failed) up to Google Calendar. Cheap to call often — already-synced items with a
-// gcalId still get refreshed so edits made offline are never permanently lost.
+// Anything without a gcalId, or marked dirty after a failed attempt, is "pending".
+// This is the durable retry queue — no separate list to keep in sync, just a scan.
+function countPending(){
+  let n = 0;
+  for(let iso=1; iso<=7; iso++){
+    for(const ev of (template[iso]||[])){ if(!ev.gcalId || ev.dirty) n++; }
+  }
+  for(const key of Object.keys(overrides)){
+    for(const ev of (overrides[key].added||[])){ if(!ev.gcalId || ev.dirty) n++; }
+  }
+  return n;
+}
+function updatePendingBadge(){
+  const dot = document.getElementById('calPendingDot');
+  if(!dot) return;
+  const pending = accessToken ? countPending() : 0;
+  dot.classList.toggle('hidden', pending===0);
+}
+
+// Push anything pending up to Google Calendar. Cheap to call often — already-synced
+// items without changes are skipped, so background auto-sync stays lightweight.
 async function runSync(onlyMissing, silent){
   if(!accessToken) return;
   let ok=0, fail=0;
   for(let iso=1; iso<=7; iso++){
     for(const ev of (template[iso]||[])){
-      if(onlyMissing && ev.gcalId) continue;
+      if(onlyMissing && ev.gcalId && !ev.dirty) continue;
       const success = await syncTemplateEvent(iso, ev, {silent:true});
       success ? ok++ : fail++;
     }
   }
   for(const key of Object.keys(overrides)){
     for(const ev of (overrides[key].added||[])){
-      if(onlyMissing && ev.gcalId) continue;
+      if(onlyMissing && ev.gcalId && !ev.dirty) continue;
       const success = await syncCustomEvent(ev, new Date(key+'T00:00:00'), {silent:true});
       success ? ok++ : fail++;
     }
@@ -1387,13 +1471,16 @@ async function runSync(onlyMissing, silent){
   if(!silent){
     if(ok===0 && fail===0) showToast('Уже всё синхронизировано');
     else if(fail===0) showToast(`Синхронизировано: ${ok} событий`);
-    else showToast(`Синхронизировано: ${ok}, не удалось: ${fail}`);
+    else showToast(`Синхронизировано: ${ok}, не удалось: ${fail} (повторю позже)`);
   }
+  updatePendingBadge();
   render();
-  renderTemplateView && document.getElementById('templateView') && !document.getElementById('templateView').classList.contains('hidden') && renderTemplateView();
+  const tplViewEl = document.getElementById('templateView');
+  if(tplViewEl && !tplViewEl.classList.contains('hidden')) renderTemplateView();
 }
 function syncMissingEvents(){ return runSync(true, true); }
 function forceFullResync(){ showToast('Синхронизирую…'); return runSync(false, false); }
+
 
 /* ================= .ics export (fallback, no account needed) ================= */
 document.getElementById('exportIcs').onclick=()=>{
@@ -1469,7 +1556,8 @@ setInterval(()=>{
 
 /* ================= Init ================= */
 (async function init(){
-  restoreTokenFromStorage();
+  await migrateLegacyStorage();
+  await restoreTokenFromStorage();
   updateCalBtn();
   await loadData();
   await loadEventTemplates();
@@ -1477,6 +1565,11 @@ setInterval(()=>{
   render();
   initGoogle();
   setInterval(render, 60000);
+  window.addEventListener('online', ()=>{ if(accessToken) runSync(true, true); });
+  document.addEventListener('visibilitychange', ()=>{
+    if(!document.hidden && accessToken) runSync(true, true);
+  });
+  setInterval(()=>{ if(accessToken) runSync(true, true); }, 3*60000);
 })();
 </script>
 </body>
