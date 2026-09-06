@@ -834,9 +834,15 @@ document.getElementById('scopeOnce').onclick=()=>setScope(true);
 document.getElementById('scopeWeekly').onclick=()=>setScope(false);
 document.getElementById('cancelBtn').onclick=closeModal;
 
+let isSavingEvent = false;
 document.getElementById('saveBtn').onclick=async ()=>{
+  if(isSavingEvent) return;
   const title = document.getElementById('fTitle').value.trim();
   if(!title){ document.getElementById('fTitle').focus(); return; }
+  isSavingEvent = true;
+  const saveBtnEl = document.getElementById('saveBtn');
+  saveBtnEl.disabled = true;
+  try{
   const time = document.getElementById('fTime').value || '09:00';
   const duration = parseInt(document.getElementById('fDuration').value);
   const remind = [...currentReminders];
@@ -901,6 +907,10 @@ document.getElementById('saveBtn').onclick=async ()=>{
     closeModal();
     // 2) Google sync happens in the background — failures never block or reopen the UI.
     syncPromise.catch(e=>console.error(e));
+  }
+  } finally {
+    isSavingEvent = false;
+    saveBtnEl.disabled = false;
   }
 };
 
@@ -1136,6 +1146,31 @@ document.getElementById('tplDeleteBtn').onclick=async ()=>{
 /* ================= Google Sign-In & Calendar API ================= */
 let tokenExpiry = 0;
 let silentRefreshInFlight = false;
+let lastSilentRefreshFail = 0;
+const TOKEN_STORAGE_KEY = 'gcal-token-v1';
+const SILENT_REFRESH_COOLDOWN = 10*60000; // don't hammer Google after a failed silent attempt
+
+function persistToken(){
+  try{
+    if(accessToken){
+      localStorage.setItem(TOKEN_STORAGE_KEY, JSON.stringify({accessToken, tokenExpiry}));
+    } else {
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+    }
+  }catch(e){ /* ignore */ }
+}
+function restoreTokenFromStorage(){
+  try{
+    const raw = localStorage.getItem(TOKEN_STORAGE_KEY);
+    if(!raw) return;
+    const data = JSON.parse(raw);
+    if(data && data.accessToken && data.tokenExpiry > Date.now() + 60000){
+      accessToken = data.accessToken;
+      tokenExpiry = data.tokenExpiry;
+      updateCalBtn();
+    }
+  }catch(e){ /* ignore */ }
+}
 
 function initGoogle(){
   if(!window.google || !google.accounts){ setTimeout(initGoogle, 300); return; }
@@ -1144,43 +1179,79 @@ function initGoogle(){
     scope: SCOPES,
     callback: (resp)=>{
       silentRefreshInFlight = false;
-      if(resp.error){ showToast('Не удалось подключиться к Google Календарю'); return; }
+      if(resp.error){
+        lastSilentRefreshFail = Date.now();
+        return; // background/foreground failures are handled by callers, no spam here
+      }
+      const wasDisconnected = !accessToken;
       accessToken = resp.access_token;
       tokenExpiry = Date.now() + ((resp.expires_in||3300)*1000);
+      persistToken();
       updateCalBtn();
-      showToast('Google Календарь подключён');
+      if(wasDisconnected){
+        showToast('Google Календарь подключён — сверяю расписание…');
+        syncMissingEvents();
+      }
     }
   });
-  // Proactively renew the token before it expires, quietly, without blocking anything.
+
+  // A token restored at startup (see init()) works for direct API calls already —
+  // tokenClient is only needed here for silent renewal once it's about to expire.
+  if(accessToken){
+    syncMissingEvents(); // catch up on anything created while we were last disconnected
+  }
+
+  // Quietly renew the token shortly before it expires. On failure, back off for a
+  // while instead of retrying (and complaining) every minute.
   setInterval(()=>{
     if(!accessToken || silentRefreshInFlight) return;
+    if(Date.now() - lastSilentRefreshFail < SILENT_REFRESH_COOLDOWN) return;
     if(Date.now() > tokenExpiry - 5*60000){
       silentRefreshInFlight = true;
       try{ tokenClient.requestAccessToken({prompt:''}); }
-      catch(e){ silentRefreshInFlight = false; }
+      catch(e){ silentRefreshInFlight = false; lastSilentRefreshFail = Date.now(); }
     }
   }, 60000);
 }
 function updateCalBtn(){
   const btn = document.getElementById('calBtn');
-  btn.classList.toggle('active', !!accessToken);
+  const stillValid = accessToken && tokenExpiry > Date.now();
+  btn.classList.toggle('active', !!stillValid);
 }
-document.getElementById('calBtn').onclick=()=>{
+
+// Short tap: connect (if disconnected) or force a fresh sync (if connected).
+// Press and hold: disconnect. This keeps "sync now" one easy tap away, since that's
+// the most reassuring thing to offer when someone worries a save didn't go through.
+let calBtnPressTimer = null;
+let calBtnLongPressed = false;
+const calBtnEl = document.getElementById('calBtn');
+calBtnEl.addEventListener('pointerdown', ()=>{
+  calBtnLongPressed = false;
+  calBtnPressTimer = setTimeout(()=>{
+    calBtnLongPressed = true;
+    if(accessToken){
+      if(confirm('Отключить синхронизацию с Google Календарём?')){
+        google.accounts.oauth2.revoke(accessToken, ()=>{
+          accessToken=null; tokenExpiry=0; notNotifiedDisconnected=true; persistToken();
+          updateCalBtn(); showToast('Отключено');
+        });
+      }
+    }
+  }, 650);
+});
+['pointerup','pointerleave','pointercancel'].forEach(evt=>{
+  calBtnEl.addEventListener(evt, ()=>{ clearTimeout(calBtnPressTimer); });
+});
+calBtnEl.addEventListener('click', ()=>{
+  if(calBtnLongPressed){ calBtnLongPressed=false; return; } // already handled by long-press
   if(!tokenClient){ showToast('Google ещё загружается, попробуй через секунду'); return; }
   if(accessToken){
-    if(confirm('Отключить синхронизацию с Google Календарём?')){
-      google.accounts.oauth2.revoke(accessToken, ()=>{
-        accessToken=null; tokenExpiry=0; notNotifiedDisconnected=true;
-        updateCalBtn(); showToast('Отключено');
-      });
-    }
+    forceFullResync();
     return;
   }
-  // Explicit user click: let Google show whatever UI it needs (account picker / consent).
-  // Never force prompt:'' here — that mode shows nothing if there's no live session, and
-  // reconnect attempts would silently do nothing.
+  // Explicit user tap: let Google show whatever UI it needs (account picker / consent).
   tokenClient.requestAccessToken();
-};
+});
 
 async function gcalFetch(path, options={}){
   if(!accessToken) return null;
@@ -1194,6 +1265,7 @@ async function gcalFetch(path, options={}){
     ]);
     if(res.status===401){
       accessToken = null;
+      persistToken();
       updateCalBtn();
       showToast('Сессия Google Календаря истекла — нажми 📅, чтобы войти снова');
       return null;
@@ -1219,10 +1291,10 @@ async function gcalResolveInstance(masterId, dateObj){
   return null;
 }
 let notNotifiedDisconnected = true;
-async function syncTemplateEvent(iso, item){
+async function syncTemplateEvent(iso, item, opts={}){
   if(!accessToken){
-    if(notNotifiedDisconnected){ notNotifiedDisconnected=false; showToast('Google Календарь не подключён — событие сохранено только локально. Нажми 📅, чтобы синхронизировать.'); }
-    return;
+    if(!opts.silent && notNotifiedDisconnected){ notNotifiedDisconnected=false; showToast('Google Календарь не подключён — событие сохранено только локально. Нажми 📅, чтобы синхронизировать.'); }
+    return false;
   }
   const start = nextOccurrence(iso);
   const [h,m] = item.time.split(':').map(Number);
@@ -1237,18 +1309,19 @@ async function syncTemplateEvent(iso, item){
   let result;
   if(item.gcalId){
     result = await gcalFetch('events/'+encodeURIComponent(item.gcalId), {method:'PATCH', body:JSON.stringify(body)});
-    if(!result) showToast('Не удалось обновить событие в календаре');
+    if(!result && !opts.silent) showToast('Не удалось обновить событие в календаре');
   } else {
     body.recurrence = ['RRULE:FREQ=WEEKLY;BYDAY='+BYDAY[iso-1]];
     result = await gcalFetch('events', {method:'POST', body:JSON.stringify(body)});
     if(result && result.id){ item.gcalId = result.id; await saveTemplate(); }
-    else showToast('Не удалось добавить событие в календарь');
+    else if(!opts.silent) showToast('Не удалось добавить событие в календарь');
   }
+  return !!result;
 }
-async function syncCustomEvent(item, dateObj){
+async function syncCustomEvent(item, dateObj, opts={}){
   if(!accessToken){
-    if(notNotifiedDisconnected){ notNotifiedDisconnected=false; showToast('Google Календарь не подключён — событие сохранено только локально. Нажми 📅, чтобы синхронизировать.'); }
-    return;
+    if(!opts.silent && notNotifiedDisconnected){ notNotifiedDisconnected=false; showToast('Google Календарь не подключён — событие сохранено только локально. Нажми 📅, чтобы синхронизировать.'); }
+    return false;
   }
   const start = new Date(dateObj);
   const [h,m] = item.time.split(':').map(Number);
@@ -1263,17 +1336,18 @@ async function syncCustomEvent(item, dateObj){
   let result;
   if(item.gcalId){
     result = await gcalFetch('events/'+encodeURIComponent(item.gcalId), {method:'PATCH', body:JSON.stringify(body)});
-    if(!result) showToast('Не удалось обновить событие в календаре');
+    if(!result && !opts.silent) showToast('Не удалось обновить событие в календаре');
   } else {
     result = await gcalFetch('events', {method:'POST', body:JSON.stringify(body)});
     if(result && result.id){ item.gcalId = result.id; await saveOverrides(); }
-    else showToast('Не удалось добавить событие в календарь');
+    else if(!opts.silent) showToast('Не удалось добавить событие в календарь');
   }
+  return !!result;
 }
 async function syncInstanceEdit(templateEvent, dateObj, newItem){
-  if(!accessToken || !templateEvent.gcalId){ return; }
+  if(!accessToken || !templateEvent.gcalId){ return false; }
   const instId = await gcalResolveInstance(templateEvent.gcalId, dateObj);
-  if(!instId){ await syncCustomEvent(newItem, dateObj); return; }
+  if(!instId){ return await syncCustomEvent(newItem, dateObj); }
   const start = new Date(dateObj);
   const [h,m] = newItem.time.split(':').map(Number);
   start.setHours(h,m,0,0);
@@ -1287,7 +1361,39 @@ async function syncInstanceEdit(templateEvent, dateObj, newItem){
   const result = await gcalFetch('events/'+encodeURIComponent(instId), {method:'PATCH', body:JSON.stringify(body)});
   if(result){ newItem.gcalId = instId; await saveOverrides(); }
   else showToast('Не удалось синхронизировать изменение этого дня');
+  return !!result;
 }
+
+// Push anything that was created/edited while disconnected (or while a sync silently
+// failed) up to Google Calendar. Cheap to call often — already-synced items with a
+// gcalId still get refreshed so edits made offline are never permanently lost.
+async function runSync(onlyMissing, silent){
+  if(!accessToken) return;
+  let ok=0, fail=0;
+  for(let iso=1; iso<=7; iso++){
+    for(const ev of (template[iso]||[])){
+      if(onlyMissing && ev.gcalId) continue;
+      const success = await syncTemplateEvent(iso, ev, {silent:true});
+      success ? ok++ : fail++;
+    }
+  }
+  for(const key of Object.keys(overrides)){
+    for(const ev of (overrides[key].added||[])){
+      if(onlyMissing && ev.gcalId) continue;
+      const success = await syncCustomEvent(ev, new Date(key+'T00:00:00'), {silent:true});
+      success ? ok++ : fail++;
+    }
+  }
+  if(!silent){
+    if(ok===0 && fail===0) showToast('Уже всё синхронизировано');
+    else if(fail===0) showToast(`Синхронизировано: ${ok} событий`);
+    else showToast(`Синхронизировано: ${ok}, не удалось: ${fail}`);
+  }
+  render();
+  renderTemplateView && document.getElementById('templateView') && !document.getElementById('templateView').classList.contains('hidden') && renderTemplateView();
+}
+function syncMissingEvents(){ return runSync(true, true); }
+function forceFullResync(){ showToast('Синхронизирую…'); return runSync(false, false); }
 
 /* ================= .ics export (fallback, no account needed) ================= */
 document.getElementById('exportIcs').onclick=()=>{
@@ -1363,6 +1469,8 @@ setInterval(()=>{
 
 /* ================= Init ================= */
 (async function init(){
+  restoreTokenFromStorage();
+  updateCalBtn();
   await loadData();
   await loadEventTemplates();
   updateNotifBtn();
